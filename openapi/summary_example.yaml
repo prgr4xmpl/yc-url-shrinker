@@ -1,0 +1,38 @@
+openapi: 3.0.0
+info:
+  title: URL Shrinker API
+  version: 1.0.0
+paths:
+  /:
+    get:
+      x-yc-apigateway-integration:
+        type: cloud-functions
+        function_id: d4eu4va8gmv5u7s4svor
+        service_account_id: ajeii0ncef4d7b6jdvhv
+  /shorten:
+    post:
+      summary: Short a link
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      x-yc-apigateway-integration:
+        type: cloud-functions
+        function_id: d4eu4va8gmv5u7s4svor
+        service_account_id: ajeii0ncef4d7b6jdvhv
+  /l/{hash}:
+    get:
+      parameters:
+        - description: hash of the url
+          name: hash
+          explode: false
+          in: path
+          required: true
+          schema:
+            type: string
+      x-yc-apigateway-integration:
+        type: cloud-functions
+        function_id: d4eu4va8gmv5u7s4svor
+        service_account_id: ajeii0ncef4d7b6jdvhv

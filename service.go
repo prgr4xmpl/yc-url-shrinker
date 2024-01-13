@@ -7,13 +7,18 @@ import (
 	"hash/fnv"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"regexp"
+	"strings"
 
 	"github.com/gorilla/mux"
+	environ "github.com/ydb-platform/ydb-go-sdk-auth-environ"
 	"github.com/ydb-platform/ydb-go-sdk/v3"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/options"
+	"github.com/ydb-platform/ydb-go-sdk/v3/table/result"
+	"github.com/ydb-platform/ydb-go-sdk/v3/table/result/named"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/types"
 )
 
@@ -51,13 +56,13 @@ func getService(ctx context.Context, dsn string, opts ...ydb.Option) (s *service
 
 	s.db, err = ydb.Open(ctx, dsn, opts...)
 	if err != nil {
-		err = fmt.Errorf("Couldn't connect to db: %v", err)
+		err = fmt.Errorf("couldn't connect to db: %v", err)
 		return
 	}
 
 	if err = s.createTable(ctx); err != nil {
 		s.db.Close(ctx)
-		err = fmt.Errorf("Couldn't create table: %v", err)
+		err = fmt.Errorf("couldn't create table: %v", err)
 		return
 	}
 
@@ -65,13 +70,14 @@ func getService(ctx context.Context, dsn string, opts ...ydb.Option) (s *service
 		w.Write([]byte("Hello, world!"))
 	}).Methods(http.MethodGet)
 	s.router.HandleFunc("/shorten", s.handleShoren).Methods(http.MethodPost)
+	longerPath := fmt.Sprintf("/l/{%s}", short)
+	s.router.HandleFunc(longerPath, s.handleLonger).Methods(http.MethodGet)
 
 	return s, nil
 }
 
 func (s *service) Close(ctx context.Context) {
 	s.db.Close(ctx)
-	return
 }
 
 func (s *service) createTable(ctx context.Context) (err error) {
@@ -92,18 +98,62 @@ func (s *service) insertShorten(ctx context.Context, url string) (hash string, e
 	}
 
 	query := fmt.Sprintf(`
+		DECLARE $hash as Text;
+		DECLARE $src as Text;
+
 		REPLACE INTO
 			urls (hash, src)
 		VALUES
 			('%s', '%s');
-	`, url, hash)
-	println(query)
+	`, hash, url)
 
 	err = s.db.Table().Do(ctx, func(ctx context.Context, session table.Session) error {
-		return session.ExecuteSchemeQuery(ctx, query)
+		_, _, err = session.Execute(ctx,
+			table.SerializableReadWriteTxControl(table.CommitTx()),
+			query,
+			nil)
+		return err
 	})
 
 	return
+}
+
+func (s *service) selectLonger(ctx context.Context, hash string) (url string, err error) {
+	query := fmt.Sprintf(`
+		DECLARE $hash as Text;
+
+		SELECT
+			src
+		FROM
+			urls
+		WHERE
+			hash = '%s';
+	`, hash)
+
+	var res result.Result
+	err = s.db.Table().Do(ctx, func(ctx context.Context, session table.Session) (err error) {
+		_, res, err = session.Execute(ctx,
+			table.OnlineReadOnlyTxControl(),
+			query,
+			nil)
+		return err
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	var src string
+	for res.NextResultSet(ctx) {
+		for res.NextRow() {
+			err = res.ScanNamed(
+				named.OptionalWithDefault("src", &src),
+			)
+			return src, err
+		}
+	}
+
+	return "", fmt.Errorf("hash '%s' not found", hash)
 }
 
 func writeResponse(w http.ResponseWriter, statusCode int, body string) {
@@ -132,4 +182,37 @@ func (s *service) handleShoren(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/text")
 	writeResponse(w, http.StatusOK, hash)
+}
+
+func (s *service) handleLonger(w http.ResponseWriter, r *http.Request) {
+	path := strings.Split(r.URL.Path, "/")
+	hash := path[len(path)-1]
+	if !isShortCorrect(hash) {
+		err := fmt.Errorf("'%s' is not a valid short URL", hash)
+		writeResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	url, err := s.selectLonger(r.Context(), hash)
+	if err != nil {
+		writeResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	http.Redirect(w, r, url, http.StatusSeeOther)
+}
+
+func Serverless(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	s, err := getService(
+		ctx,
+		os.Getenv("YDB"),
+		environ.WithEnvironCredentials(ctx),
+	)
+	if err != nil {
+		writeResponse(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer s.Close(ctx)
+	s.router.ServeHTTP(w, r)
 }

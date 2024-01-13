@@ -11,9 +11,8 @@ import (
 )
 
 var (
-	dsn      string
-	port     int
-	logLevel string
+	dsn  string
+	port int
 )
 
 func init() {
